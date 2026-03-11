@@ -1,0 +1,174 @@
+{
+  "_comment": {
+    "purpose": "Custom Patch Manager baseline for Amazon Linux 2 instances.",
+    "design_notes": [
+      "This baseline enforces automatic approval of Critical and Important security patches after a 7-day delay.",
+      "The 7-day delay provides a buffer to catch problematic patches before fleet-wide deployment.",
+      "Low and Medium severity patches require manual approval to prevent unnecessary churn.",
+      "Bugfix and Enhancement classifications are excluded from auto-approval — security patches only.",
+      "Rejected patches list blocks known problematic packages from being installed."
+    ],
+    "compliance_notes": [
+      "Patch SLAs reflect common compliance framework requirements:",
+      "  Critical: 7 days (aligns with CISA KEV remediation guidance for internet-facing systems)",
+      "  Important: 14 days (aligns with NIST SP 800-40 guidance for high severity)",
+      "  Moderate/Low: 30-60 days or manual review",
+      "Adjust auto_approval_delay_days to match your organization's patching SLA policy."
+    ]
+  },
+
+  "baseline_configuration": {
+    "Name": "custom-linux-baseline",
+    "Description": "Custom patch baseline for Amazon Linux 2. Auto-approves Critical and Important security patches after 7 days. Requires manual approval for Moderate and Low severity.",
+    "OperatingSystem": "AMAZON_LINUX_2",
+    "GlobalFilters": {
+      "_comment": "Global filters apply before approval rules. Used to exclude patch classifications that should never be auto-approved.",
+      "PatchFilters": [
+        {
+          "Key": "PRODUCT",
+          "Values": ["AmazonLinux2", "AmazonLinux2.0"]
+        }
+      ]
+    },
+    "ApprovalRules": {
+      "PatchRules": [
+        {
+          "_comment": "Rule 1: Auto-approve Critical security patches after 7 days.",
+          "PatchFilterGroup": {
+            "PatchFilters": [
+              {
+                "Key": "CLASSIFICATION",
+                "Values": ["Security"]
+              },
+              {
+                "Key": "SEVERITY",
+                "Values": ["Critical"]
+              }
+            ]
+          },
+          "ApproveAfterDays": 7,
+          "ComplianceLevel": "CRITICAL",
+          "EnableNonSecurity": false
+        },
+        {
+          "_comment": "Rule 2: Auto-approve Important security patches after 7 days.",
+          "PatchFilterGroup": {
+            "PatchFilters": [
+              {
+                "Key": "CLASSIFICATION",
+                "Values": ["Security"]
+              },
+              {
+                "Key": "SEVERITY",
+                "Values": ["Important"]
+              }
+            ]
+          },
+          "ApproveAfterDays": 7,
+          "ComplianceLevel": "HIGH",
+          "EnableNonSecurity": false
+        },
+        {
+          "_comment": "Rule 3: Auto-approve Moderate security patches after 14 days. ComplianceLevel MEDIUM means missing these patches triggers a Medium finding.",
+          "PatchFilterGroup": {
+            "PatchFilters": [
+              {
+                "Key": "CLASSIFICATION",
+                "Values": ["Security"]
+              },
+              {
+                "Key": "SEVERITY",
+                "Values": ["Medium"]
+              }
+            ]
+          },
+          "ApproveAfterDays": 14,
+          "ComplianceLevel": "MEDIUM",
+          "EnableNonSecurity": false
+        }
+      ]
+    },
+
+    "ApprovedPatches": {
+      "_comment": "Explicitly approved patches outside the approval rules above. Use for emergency approvals or patches that do not match the rule filters.",
+      "patches": [],
+      "ComplianceLevel": "CRITICAL",
+      "EnableNonSecurity": false
+    },
+
+    "RejectedPatches": {
+      "_comment": "Patches listed here will never be installed regardless of approval rules. Use for packages with known stability issues or incompatibilities in your environment.",
+      "patches": [],
+      "RejectedPatchesAction": "BLOCK",
+      "_block_vs_allow_note": "BLOCK prevents installation entirely. Use ALLOW_AS_DEPENDENCY only if a rejected package is required as a transitive dependency by an approved patch."
+    },
+
+    "PatchGroups": ["AmazonLinux2-Standard"],
+    "_patch_group_note": "Instances must be tagged with 'Patch Group: AmazonLinux2-Standard' to use this baseline. See runbook-patching.md Step 2 for tagging instructions."
+  },
+
+  "compliance_levels_reference": {
+    "_comment": "Reference guide for ComplianceLevel values and their meaning in Patch Manager reporting.",
+    "CRITICAL": "Missing patch generates a Critical compliance finding. Blocks compliant status immediately.",
+    "HIGH": "Missing patch generates a High finding.",
+    "MEDIUM": "Missing patch generates a Medium finding.",
+    "LOW": "Missing patch generates a Low finding.",
+    "INFORMATIONAL": "Missing patch is recorded but does not affect compliance status.",
+    "UNSPECIFIED": "Compliance impact is determined by the patch severity metadata from the vendor."
+  },
+
+  "severity_sla_policy": {
+    "_comment": "Patch remediation SLA targets for this environment. Update to match your organization's policy.",
+    "Critical": {
+      "auto_approval_delay_days": 7,
+      "remediation_sla_days": 7,
+      "compliance_level": "CRITICAL",
+      "rationale": "Critical CVEs represent active exploitation risk. 7-day window balances testing buffer with exposure window."
+    },
+    "Important": {
+      "auto_approval_delay_days": 7,
+      "remediation_sla_days": 14,
+      "compliance_level": "HIGH",
+      "rationale": "Important patches address significant vulnerabilities. 14-day SLA allows for controlled maintenance window scheduling."
+    },
+    "Moderate": {
+      "auto_approval_delay_days": 14,
+      "remediation_sla_days": 30,
+      "compliance_level": "MEDIUM",
+      "rationale": "Moderate patches present limited risk. 30-day window allows batching with regular maintenance cycles."
+    },
+    "Low": {
+      "auto_approval_delay_days": null,
+      "remediation_sla_days": 60,
+      "compliance_level": "LOW",
+      "rationale": "Low severity patches bundled into quarterly patching cycles. Manual approval required."
+    }
+  },
+
+  "aws_cli_deployment": {
+    "_comment": "Commands to register this baseline in AWS and set it as the default for Amazon Linux 2.",
+    "create_baseline": "aws ssm create-patch-baseline --name custom-linux-baseline --operating-system AMAZON_LINUX_2 --cli-input-json file://patch-policies/patch-baseline.json",
+    "set_as_default": "aws ssm register-default-patch-baseline --baseline-id <baseline-id-returned-above>",
+    "register_patch_group": "aws ssm register-patch-baseline-for-patch-group --baseline-id <baseline-id> --patch-group AmazonLinux2-Standard",
+    "verify_baseline": "aws ssm get-patch-baseline --baseline-id <baseline-id>"
+  },
+
+  "tuning_guide": {
+    "_comment": "Common adjustments for different environment types.",
+    "for_production": {
+      "auto_approval_delay_days_critical": 7,
+      "auto_approval_delay_days_important": 7,
+      "note": "Production matches default config. Do not shorten delay below 7 days without security team approval."
+    },
+    "for_development": {
+      "auto_approval_delay_days_critical": 0,
+      "auto_approval_delay_days_important": 0,
+      "note": "Dev environments can use 0-day delay to stay on latest patches and catch conflicts early."
+    },
+    "for_highly_regulated": {
+      "auto_approval_delay_days_critical": 3,
+      "manual_approval_required_for": ["Important", "Moderate", "Low"],
+      "note": "Regulated environments may require shorter critical SLAs and manual approval gates for audit evidence."
+    }
+  }
+}
