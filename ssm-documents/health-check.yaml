@@ -1,0 +1,119 @@
+---
+schemaVersion: "2.2"
+description: >
+  Performs a standard health check on Amazon Linux 2 instances.
+  Checks system uptime, CPU load, memory usage, disk usage, and
+  critical service status. Intended for use by app teams and on-call
+  engineers during incident triage or routine validation.
+
+parameters:
+  Services:
+    type: String
+    description: "Comma-separated list of services to check (e.g. httpd,crond,amazon-ssm-agent)"
+    default: "amazon-ssm-agent,crond"
+  DiskThresholdPercent:
+    type: String
+    description: "Disk usage percentage that triggers a warning in output"
+    default: "80"
+
+mainSteps:
+  - name: CheckUptime
+    action: aws:runShellScript
+    description: Reports system uptime and last reboot time.
+    inputs:
+      runCommand:
+        - echo "=== UPTIME ==="
+        - uptime
+        - echo ""
+        - echo "=== LAST REBOOT ==="
+        - who -b
+
+  - name: CheckCPULoad
+    action: aws:runShellScript
+    description: Reports current CPU load averages (1, 5, 15 minute).
+    inputs:
+      runCommand:
+        - echo "=== CPU LOAD AVERAGES ==="
+        - cat /proc/loadavg
+        - echo ""
+        - echo "=== TOP 5 CPU-CONSUMING PROCESSES ==="
+        - ps aux --sort=-%cpu | head -6
+
+  - name: CheckMemory
+    action: aws:runShellScript
+    description: Reports total, used, and available memory.
+    inputs:
+      runCommand:
+        - echo "=== MEMORY USAGE ==="
+        - free -h
+        - echo ""
+        - echo "=== TOP 5 MEMORY-CONSUMING PROCESSES ==="
+        - ps aux --sort=-%mem | head -6
+
+  - name: CheckDiskUsage
+    action: aws:runShellScript
+    description: >
+      Reports disk usage across all mounted filesystems.
+      Flags any filesystem exceeding the DiskThresholdPercent parameter.
+    inputs:
+      runCommand:
+        - echo "=== DISK USAGE ==="
+        - df -h
+        - echo ""
+        - echo "=== FILESYSTEMS EXCEEDING {{ DiskThresholdPercent }}% ==="
+        - df -h | awk 'NR>1 { gsub(/%/,"",$5); if ($5+0 >= {{ DiskThresholdPercent }}+0) print "WARNING: "$0 }'
+        - echo "(No output above means all filesystems are within threshold)"
+
+  - name: CheckServices
+    action: aws:runShellScript
+    description: >
+      Checks the running status of each service provided in the Services parameter.
+      Reports active/inactive status for each.
+    inputs:
+      runCommand:
+        - echo "=== SERVICE STATUS ==="
+        - |
+          IFS=',' read -ra SERVICES <<< "{{ Services }}"
+          for svc in "${SERVICES[@]}"; do
+            svc=$(echo "$svc" | xargs)  # trim whitespace
+            status=$(systemctl is-active "$svc" 2>/dev/null || echo "not-found")
+            if [ "$status" = "active" ]; then
+              echo "OK       $svc is $status"
+            else
+              echo "WARNING  $svc is $status"
+            fi
+          done
+
+  - name: CheckNetworkConnectivity
+    action: aws:runShellScript
+    description: Validates outbound connectivity to AWS SSM and S3 endpoints.
+    inputs:
+      runCommand:
+        - echo "=== NETWORK CONNECTIVITY ==="
+        - |
+          endpoints=(
+            "ssm.us-east-1.amazonaws.com"
+            "s3.amazonaws.com"
+          )
+          for endpoint in "${endpoints[@]}"; do
+            if curl -sf --max-time 5 "https://$endpoint" > /dev/null 2>&1 || \
+               curl -sf --max-time 5 "https://$endpoint" -o /dev/null; then
+              echo "OK       $endpoint reachable"
+            else
+              echo "WARNING  $endpoint unreachable"
+            fi
+          done
+
+  - name: SummaryReport
+    action: aws:runShellScript
+    description: Prints a summary footer with instance metadata for log correlation.
+    inputs:
+      runCommand:
+        - echo ""
+        - echo "=== INSTANCE SUMMARY ==="
+        - echo "Hostname    : $(hostname)"
+        - echo "Instance ID : $(curl -sf http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo 'unavailable')"
+        - echo "Region      : $(curl -sf http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo 'unavailable')"
+        - echo "Timestamp   : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        - echo ""
+        - echo "Health check complete."

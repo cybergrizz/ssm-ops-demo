@@ -1,0 +1,135 @@
+---
+schemaVersion: "2.2"
+description: >
+  Collects application logs from specified paths on Amazon Linux 2 instances,
+  compresses them into a timestamped archive, and uploads to a designated S3 bucket.
+  Intended for use by app teams during incident response or post-incident review.
+  Requires the SSM instance profile to have s3:PutObject permissions on the target bucket.
+
+parameters:
+  LogPaths:
+    type: String
+    description: >
+      Space-separated list of log file paths or directories to collect.
+      Supports wildcards (e.g. /var/log/httpd/*.log /var/log/app/error.log).
+    default: "/var/log/messages /var/log/secure"
+  S3BucketName:
+    type: String
+    description: "S3 bucket name to upload the compressed log archive to."
+  S3KeyPrefix:
+    type: String
+    description: "S3 key prefix (folder path) for the uploaded archive."
+    default: "ssm-log-collections"
+  MaxLogAgeDays:
+    type: String
+    description: "Only collect log files modified within this many days. Use 0 to collect all."
+    default: "3"
+
+mainSteps:
+  - name: ValidateLogPaths
+    action: aws:runShellScript
+    description: >
+      Checks that each provided log path exists and is readable.
+      Reports warnings for missing paths before attempting collection.
+    inputs:
+      runCommand:
+        - echo "=== VALIDATING LOG PATHS ==="
+        - |
+          for path in {{ LogPaths }}; do
+            if ls $path > /dev/null 2>&1; then
+              echo "OK       $path found"
+            else
+              echo "WARNING  $path not found or empty — skipping"
+            fi
+          done
+
+  - name: CreateStagingDirectory
+    action: aws:runShellScript
+    description: Creates a temporary staging directory for log collection.
+    inputs:
+      runCommand:
+        - STAGING_DIR="/tmp/ssm-log-collect-$(date +%s)"
+        - mkdir -p "$STAGING_DIR"
+        - echo "Staging directory: $STAGING_DIR"
+        - echo "$STAGING_DIR" > /tmp/ssm-staging-path.txt
+
+  - name: CollectLogs
+    action: aws:runShellScript
+    description: >
+      Copies log files from the specified paths into the staging directory.
+      Filters by modification time if MaxLogAgeDays is set.
+    inputs:
+      runCommand:
+        - STAGING_DIR=$(cat /tmp/ssm-staging-path.txt)
+        - echo "=== COLLECTING LOGS ==="
+        - |
+          for path in {{ LogPaths }}; do
+            if ls $path > /dev/null 2>&1; then
+              if [ "{{ MaxLogAgeDays }}" -gt "0" ]; then
+                find $path -maxdepth 1 -type f -mtime -{{ MaxLogAgeDays }} -exec cp {} "$STAGING_DIR/" \; 2>/dev/null
+              else
+                cp $path "$STAGING_DIR/" 2>/dev/null || true
+              fi
+            fi
+          done
+        - echo "Files collected:"
+        - ls -lh "$STAGING_DIR/"
+
+  - name: AppendInstanceMetadata
+    action: aws:runShellScript
+    description: Writes instance metadata to a context file included in the archive.
+    inputs:
+      runCommand:
+        - STAGING_DIR=$(cat /tmp/ssm-staging-path.txt)
+        - |
+          cat > "$STAGING_DIR/collection-context.txt" <<EOF
+          Collection Timestamp : $(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          Hostname             : $(hostname)
+          Instance ID          : $(curl -sf http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo 'unavailable')
+          Region               : $(curl -sf http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo 'unavailable')
+          Log Paths Requested  : {{ LogPaths }}
+          Max Log Age (Days)   : {{ MaxLogAgeDays }}
+          EOF
+        - echo "Context file written."
+
+  - name: CompressArchive
+    action: aws:runShellScript
+    description: Compresses the staging directory into a timestamped .tar.gz archive.
+    inputs:
+      runCommand:
+        - STAGING_DIR=$(cat /tmp/ssm-staging-path.txt)
+        - INSTANCE_ID=$(curl -sf http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo 'unknown')
+        - TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+        - ARCHIVE_NAME="logs-${INSTANCE_ID}-${TIMESTAMP}.tar.gz"
+        - ARCHIVE_PATH="/tmp/$ARCHIVE_NAME"
+        - tar -czf "$ARCHIVE_PATH" -C "$STAGING_DIR" .
+        - echo "Archive created: $ARCHIVE_PATH"
+        - ls -lh "$ARCHIVE_PATH"
+        - echo "$ARCHIVE_PATH" > /tmp/ssm-archive-path.txt
+        - echo "$ARCHIVE_NAME" > /tmp/ssm-archive-name.txt
+
+  - name: UploadToS3
+    action: aws:runShellScript
+    description: >
+      Uploads the compressed archive to the specified S3 bucket.
+      Requires s3:PutObject permission on the target bucket in the instance IAM role.
+    inputs:
+      runCommand:
+        - ARCHIVE_PATH=$(cat /tmp/ssm-archive-path.txt)
+        - ARCHIVE_NAME=$(cat /tmp/ssm-archive-name.txt)
+        - S3_KEY="{{ S3KeyPrefix }}/$ARCHIVE_NAME"
+        - echo "=== UPLOADING TO S3 ==="
+        - echo "Bucket : {{ S3BucketName }}"
+        - echo "Key    : $S3_KEY"
+        - aws s3 cp "$ARCHIVE_PATH" "s3://{{ S3BucketName }}/$S3_KEY"
+        - echo "Upload complete."
+
+  - name: Cleanup
+    action: aws:runShellScript
+    description: Removes temporary staging files and archive from the instance.
+    inputs:
+      runCommand:
+        - STAGING_DIR=$(cat /tmp/ssm-staging-path.txt)
+        - ARCHIVE_PATH=$(cat /tmp/ssm-archive-path.txt)
+        - rm -rf "$STAGING_DIR" "$ARCHIVE_PATH" /tmp/ssm-staging-path.txt /tmp/ssm-archive-path.txt /tmp/ssm-archive-name.txt
+        - echo "Cleanup complete. No log data remains on instance."
