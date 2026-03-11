@@ -1,0 +1,202 @@
+{
+  "_comment": {
+    "purpose": "Least-privilege IAM role for EC2 instances managed by AWS Systems Manager.",
+    "design_notes": [
+      "This role grants only the permissions required for SSM core functions: agent registration, Run Command, Session Manager, and Patch Manager.",
+      "No wildcard actions (*) are used except where AWS requires it for SSM message channel operations.",
+      "S3 and CloudWatch permissions are scoped to specific resource prefixes to limit blast radius.",
+      "This role does NOT include broad EC2, S3, or admin permissions.",
+      "For instances that need additional access (e.g. application-specific S3 buckets), attach a separate role policy rather than expanding this baseline."
+    ],
+    "compliance_notes": [
+      "Follows AWS least-privilege IAM design principles.",
+      "Satisfies NIST SP 800-53 AC-6 (Least Privilege) and AC-3 (Access Enforcement).",
+      "All permissions are documented with operational justification below."
+    ]
+  },
+
+  "trust_policy": {
+    "_comment": "Allows EC2 instances to assume this role via the instance metadata service.",
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "AllowEC2AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "ec2.amazonaws.com"
+        },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+
+  "role_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+
+      {
+        "Sid": "SSMCoreAgentPermissions",
+        "_comment": "Required for SSM Agent to register the instance with Systems Manager and receive configuration.",
+        "Effect": "Allow",
+        "Action": [
+          "ssm:DescribeAssociation",
+          "ssm:GetDeployablePatchSnapshotForInstance",
+          "ssm:GetDocument",
+          "ssm:DescribeDocument",
+          "ssm:GetManifest",
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+          "ssm:ListAssociations",
+          "ssm:ListInstanceAssociations",
+          "ssm:PutInventory",
+          "ssm:PutComplianceItems",
+          "ssm:PutConfigurePackageResult",
+          "ssm:UpdateAssociationStatus",
+          "ssm:UpdateInstanceAssociationStatus",
+          "ssm:UpdateInstanceInformation"
+        ],
+        "Resource": "*",
+        "_resource_note": "SSM agent operations require * resource scope — AWS does not support resource-level restrictions on these actions."
+      },
+
+      {
+        "Sid": "SSMSessionManagerPermissions",
+        "_comment": "Required for Session Manager to establish encrypted shell sessions. Replaces SSH/bastion host access.",
+        "Effect": "Allow",
+        "Action": [
+          "ssmmessages:CreateControlChannel",
+          "ssmmessages:CreateDataChannel",
+          "ssmmessages:OpenControlChannel",
+          "ssmmessages:OpenDataChannel"
+        ],
+        "Resource": "*",
+        "_resource_note": "ssmmessages actions do not support resource-level restrictions per AWS documentation."
+      },
+
+      {
+        "Sid": "EC2MessagesRunCommandPermissions",
+        "_comment": "Required for Run Command to deliver commands to the instance and receive responses.",
+        "Effect": "Allow",
+        "Action": [
+          "ec2messages:AcknowledgeMessage",
+          "ec2messages:DeleteMessage",
+          "ec2messages:FailMessage",
+          "ec2messages:GetEndpoint",
+          "ec2messages:GetMessages",
+          "ec2messages:SendReply"
+        ],
+        "Resource": "*",
+        "_resource_note": "ec2messages actions do not support resource-level restrictions per AWS documentation."
+      },
+
+      {
+        "Sid": "PatchManagerPermissions",
+        "_comment": "Required for Patch Manager to scan instance patch state and report compliance.",
+        "Effect": "Allow",
+        "Action": [
+          "ssm:DescribeInstancePatches",
+          "ssm:DescribeInstancePatchStates",
+          "ssm:DescribeInstancePatchStatesForPatchGroup",
+          "ssm:DescribePatchBaselines",
+          "ssm:DescribePatchGroups",
+          "ssm:DescribePatchGroupState",
+          "ssm:GetDefaultPatchBaseline",
+          "ssm:GetPatchBaseline",
+          "ssm:GetPatchBaselineForPatchGroup"
+        ],
+        "Resource": "*"
+      },
+
+      {
+        "Sid": "CloudWatchLogsForSessionAndRunCommand",
+        "_comment": "Allows SSM to write session logs and Run Command output to CloudWatch Logs for audit retention.",
+        "Effect": "Allow",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:*:*:log-group:/ssm/*",
+          "arn:aws:logs:*:*:log-group:/ssm/*:log-stream:*"
+        ],
+        "_resource_note": "Scoped to /ssm/* log group prefix. Expand prefix only if app teams require a different log group path."
+      },
+
+      {
+        "Sid": "S3LogUploadForLogCollector",
+        "_comment": "Allows the log-collector SSM document to upload compressed log archives to the designated bucket. Scoped to ssm-log-collections prefix only.",
+        "Effect": "Allow",
+        "Action": [
+          "s3:PutObject"
+        ],
+        "Resource": "arn:aws:s3:::YOUR-LOG-BUCKET-NAME/ssm-log-collections/*",
+        "_resource_note": "Replace YOUR-LOG-BUCKET-NAME with your actual bucket name. Do not use * for the bucket name."
+      },
+
+      {
+        "Sid": "S3GetEncryptionForSessionManager",
+        "_comment": "Required if Session Manager is configured to encrypt session data stored in S3.",
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetEncryptionConfiguration"
+        ],
+        "Resource": "*"
+      },
+
+      {
+        "Sid": "KMSDecryptForEncryptedSessions",
+        "_comment": "Required if Session Manager uses a customer-managed KMS key for session encryption. Remove this block if using AWS-managed keys.",
+        "Effect": "Allow",
+        "Action": [
+          "kms:Decrypt",
+          "kms:GenerateDataKey"
+        ],
+        "Resource": "arn:aws:kms:us-east-1:YOUR-ACCOUNT-ID:key/YOUR-KMS-KEY-ID",
+        "_resource_note": "Replace with your KMS key ARN. Scoped to specific key — never use * for KMS resource."
+      }
+
+    ]
+  },
+
+  "setup_instructions": {
+    "step_1_create_role": {
+      "_comment": "Create the IAM role with the trust policy above.",
+      "command": "aws iam create-role --role-name SSMInstanceRole --assume-role-policy-document file://iam/trust-policy.json"
+    },
+    "step_2_attach_managed_policy": {
+      "_comment": "The AWS managed policy covers all core SSM agent permissions and is kept current by AWS.",
+      "command": "aws iam attach-role-policy --role-name SSMInstanceRole --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+    },
+    "step_3_attach_custom_policy": {
+      "_comment": "Attach the custom inline policy for scoped S3, CloudWatch, and KMS permissions.",
+      "command": "aws iam put-role-policy --role-name SSMInstanceRole --policy-name SSMCustomPermissions --policy-document file://iam/ssm-instance-profile.json"
+    },
+    "step_4_create_instance_profile": {
+      "_comment": "EC2 instances require an instance profile wrapper around the IAM role.",
+      "commands": [
+        "aws iam create-instance-profile --instance-profile-name SSMInstanceProfile",
+        "aws iam add-role-to-instance-profile --instance-profile-name SSMInstanceProfile --role-name SSMInstanceRole"
+      ]
+    },
+    "step_5_attach_to_instance": {
+      "_comment": "Attach the instance profile to a running or new EC2 instance.",
+      "command": "aws ec2 associate-iam-instance-profile --instance-id <instance-id> --iam-instance-profile Name=SSMInstanceProfile"
+    }
+  },
+
+  "permission_removal_guide": {
+    "_comment": "Use this guide to scope down the policy for environments that do not need all features.",
+    "if_not_using_session_manager": "Remove the SSMSessionManagerPermissions statement.",
+    "if_not_using_log_collector": "Remove the S3LogUploadForLogCollector statement.",
+    "if_not_using_cloudwatch_logging": "Remove the CloudWatchLogsForSessionAndRunCommand statement.",
+    "if_not_using_kms_encryption": "Remove the KMSDecryptForEncryptedSessions statement.",
+    "always_keep": [
+      "SSMCoreAgentPermissions",
+      "EC2MessagesRunCommandPermissions",
+      "PatchManagerPermissions"
+    ]
+  }
+}
