@@ -1,0 +1,36 @@
+{
+  "PatchRules": [
+    {
+      "PatchFilterGroup": {
+        "PatchFilters": [
+          {
+            "Key": "CLASSIFICATION",
+            "Values": ["Security"]
+          },
+          {
+            "Key": "SEVERITY",
+            "Values": ["Critical"]
+          }
+        ]
+      },
+      "ApproveAfterDays": 7,
+      "ComplianceLevel": "CRITICAL"
+    },
+    {
+      "PatchFilterGroup": {
+        "PatchFilters": [
+          {
+            "Key": "CLASSIFICATION",
+            "Values": ["Security"]
+          },
+          {
+            "Key": "SEVERITY",
+            "Values": ["Important"]
+          }
+        ]
+      },
+      "ApproveAfterDays": 7,
+      "ComplianceLevel": "HIGH"
+    }
+  ]
+}
